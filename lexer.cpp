@@ -1,6 +1,17 @@
 #include <string>
-// The lexer returns tokens [0-255] if it is an unknown character, otherwise one
-// of these for known things.
+#include <vector>
+#include <cctype>
+#include <iostream>
+// Tokens to be defined
+// Keyword,
+// Identifier,
+// Literal,
+// Operator,
+// Punctuation,
+// EndOfFile,
+// Unknown
+
+
 enum Token
 {
   tok_eof = -1,
