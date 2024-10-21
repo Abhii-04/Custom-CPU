@@ -1,0 +1,26 @@
+THINGS TO TEST GPU COMPILER ON...
+
+1. Matrix Multiplication
+Task: Multiply two large matrices together.
+Why GPU: Matrix multiplication is a classic example of a task that can be easily parallelized. Each element of the output matrix can be computed independently, making it ideal for the many-core architecture of GPUs. A simple custom GPU compiler can optimize this by launching multiple threads, one for each matrix element computation.
+2. Vector Addition/Subtraction
+Task: Add or subtract two large vectors element-wise.
+Why GPU: Like matrix multiplication, this task is embarrassingly parallel, where each element of the result vector is independent of others. A simple custom compiler can easily distribute these operations across multiple GPU cores.
+3. Image Filtering
+Task: Apply a basic filter (e.g., Gaussian blur, edge detection) to an image.
+Why GPU: Image filtering involves applying the same operation to every pixel of an image. Each pixel can be processed in parallel, making it a good fit for GPU-based parallel execution. The custom compiler can translate each pixel operation into a GPU thread.
+4. Mandelbrot Set Calculation
+Task: Generate a Mandelbrot fractal by iterating a function over a grid of complex numbers.
+Why GPU: Each point in the Mandelbrot set can be computed independently, making it highly parallelizable. A simple custom GPU compiler can map each point on the grid to a GPU thread, improving the efficiency of the fractal generation.
+5. Parallel Sorting (Bitonic Sort)
+Task: Perform parallel sorting of an array using an algorithm like Bitonic sort.
+Why GPU: Sorting algorithms like Bitonic sort can be efficiently parallelized on GPUs by dividing the input array into smaller chunks and sorting them concurrently. Your custom compiler can break down the sorting algorithm into GPU-friendly operations, such as comparisons and swaps performed in parallel.
+6. Prefix Sum (Scan)
+Task: Compute the prefix sum (cumulative sum) of a large array.
+Why GPU: This task can be split into smaller chunks, and each partial sum can be calculated independently. A custom GPU compiler can handle this task by breaking the array into sections and summing them in parallel.
+7. Element-wise Array Operations (e.g., Fused Multiply-Add)
+Task: Perform a fused multiply-add operation on arrays, such as C[i] = A[i] * B[i] + D[i] for large arrays.
+Why GPU: This task is easily parallelizable because each element’s computation is independent of the others. A custom compiler can translate this into a set of parallel GPU threads.
+8. Basic Physics Simulations (N-Body Problem)
+Task: Simulate the interactions between a set of particles in space, such as gravitational or electrostatic forces (N-body problem).
+Why GPU: Although the N-body problem grows in complexity with more particles, the interactions between individual particles can be computed independently, allowing for parallel execution. A simple custom compiler can break down these calculations into smaller tasks for each particle.
