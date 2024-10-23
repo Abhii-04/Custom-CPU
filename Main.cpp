@@ -125,7 +125,11 @@ private:
                 braceCount++;
             } else if (source[currentPos] == '}') {
                 braceCount--;
-                if (braceCount == 0) break; 
+                if (braceCount == 0) {
+                    currentPos++; // Move past the closing brace
+                    column++;
+                    break; 
+                }
             }
             currentPos++;
             column++;

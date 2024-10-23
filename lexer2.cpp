@@ -5,7 +5,7 @@
 
 enum class TokenType {
     Identifier,
-    Literal,
+    Literal
     Operator,
     Punctuation,
     Unknown,
@@ -106,3 +106,36 @@ private:
         return source.substr(start, currentPos - start);
     }
 };
+
+
+int main() {
+    // Sample source code to tokenize
+    std::string source = "int a = 42;\nfloat b = a + 3.14;";
+
+    // Create an instance of the Lexer
+    Lexer lexer(source);
+
+    // Tokenize the source code
+    std::vector<Token> tokens = lexer.tokenize();
+
+    // Print the tokens
+    std::cout << "Tokens:\n";
+    for (const auto& token : tokens) {
+        std::string tokenType;
+        switch (token.type) {
+            case TokenType::Identifier: tokenType = "Identifier"; break;
+            case TokenType::Literal: tokenType = "Literal"; break;
+            case TokenType::Operator: tokenType = "Operator"; break;
+            case TokenType::Punctuation: tokenType = "Punctuation"; break;
+            case TokenType::Unknown: tokenType = "Unknown"; break;
+            case TokenType::EndOfFile: tokenType = "EndOfFile"; break;
+        }
+
+        std::cout << "Type: " << tokenType
+                  << ", Value: \"" << token.value << "\""
+                  << ", Line: " << token.line
+                  << ", Column: " << token.column << "\n";
+    }
+
+    return 0;
+}
