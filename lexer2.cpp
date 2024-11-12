@@ -5,7 +5,7 @@
 
 enum class TokenType {
     Identifier,
-    Literal
+    Literal,
     Operator,
     Punctuation,
     Unknown,

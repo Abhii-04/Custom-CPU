@@ -5,260 +5,187 @@
 #include <memory>
 #include <stdexcept>
 #include <sstream>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <vector>
 
-// Token Types
-enum class TokenType {
-    Identifier,
-    Literal,
-    Operator,
-    Punctuation,
-    MatrixLiteral,
-    Unknown,
-    EndOfFile
+// AST Classes
+class ASTNode {
+public:
+    virtual ~ASTNode() = default;
+    virtual void print(int indent = 0) const = 0; // Virtual print method for derived classes
 };
 
-// Token Class
-class Token {
+// Binary operation node
+class BinaryOperationNode : public ASTNode {
 public:
-    Token(TokenType type, const std::string& value, size_t line, size_t column)
-        : type(type), value(value), line(line), column(column) {}
+    BinaryOperationNode(std::unique_ptr<ASTNode> left, std::string op, std::unique_ptr<ASTNode> right)
+        : left(std::move(left)), op(std::move(op)), right(std::move(right)) {}
 
-    TokenType type;
+    void print(int indent = 0) const override {
+        std::cout << std::string(indent, ' ') << "BinaryOperation: " << op << std::endl;
+        if (left) left->print(indent + 2);
+        if (right) right->print(indent + 2);
+    }
+
+private:
+    std::unique_ptr<ASTNode> left;
+    std::string op;
+    std::unique_ptr<ASTNode> right;
+};
+
+// Identifier node
+class IdentifierNode : public ASTNode {
+public:
+    IdentifierNode(std::string name) : name(std::move(name)) {}
+
+    void print(int indent = 0) const override {
+        std::cout << std::string(indent, ' ') << "Identifier: " << name << std::endl;
+    }
+
+private:
+    std::string name;
+};
+
+// Literal node
+class LiteralNode : public ASTNode {
+public:
+    LiteralNode(std::string value) : value(std::move(value)) {}
+
+    void print(int indent = 0) const override {
+        std::cout << std::string(indent, ' ') << "Literal: " << value << std::endl;
+    }
+
+private:
     std::string value;
-    size_t line;
-    size_t column;
 };
 
-// Lexer Class
-class Lexer {
+// Parser Class
+class Parser {
 public:
-    Lexer(const std::string& source) : source(source), currentPos(0), line(1), column(0) {}
+    Parser() : currentPos(0) {}
 
-    std::vector<Token> tokenize() {
+    std::unique_ptr<ASTNode> parse(const std::string& input) {
+        tokens = tokenize(input);
+        currentPos = 0;
+        return parseExpression();
+    }
+
+private:
+    enum class TokenType {
+        Identifier,
+        Literal,
+        Operator,
+        Unknown,
+        EndOfFile
+    };
+
+    struct Token {
+        TokenType type;
+        std::string value;
+    };
+
+    std::vector<Token> tokens;
+    size_t currentPos;
+
+    std::vector<Token> tokenize(const std::string& input) {
         std::vector<Token> tokens;
-        while (currentPos < source.length()) {
-            char currentChar = source[currentPos];
+        size_t pos = 0;
+        while (pos < input.length()) {
+            char currentChar = input[pos];
 
             if (std::isspace(currentChar)) {
-                if (currentChar == '\n') {
-                    line++;
-                    column = 0;
-                } else {
-                    column++;
-                }
-                currentPos++;
+                pos++;
                 continue;
             }
 
             if (std::isalpha(currentChar)) {
-                std::string identifier = readIdentifier();
-                tokens.emplace_back(TokenType::Identifier, identifier, line, column);
+                std::string identifier;
+                while (pos < input.length() && (std::isalnum(input[pos]) || input[pos] == '_')) {
+                    identifier += input[pos];
+                    pos++;
+                }
+                tokens.push_back({ TokenType::Identifier, identifier });
                 continue;
             }
 
             if (std::isdigit(currentChar)) {
-                std::string literal = readLiteral();
-                tokens.emplace_back(TokenType::Literal, literal, line, column);
+                std::string literal;
+                while (pos < input.length() && std::isdigit(input[pos])) {
+                    literal += input[pos];
+                    pos++;
+                }
+                tokens.push_back({ TokenType::Literal, literal });
                 continue;
             }
 
-            if (currentChar == '{') {
-                std::string matrixLiteral = readMatrixLiteral();
-                tokens.emplace_back(TokenType::MatrixLiteral, matrixLiteral, line, column);
-                continue;
-            }
-
-            // Operators
             if (currentChar == '+' || currentChar == '-' || currentChar == '*' || currentChar == '/') {
-                tokens.emplace_back(TokenType::Operator, std::string(1, currentChar), line, column);
-                currentPos++;
-                column++;
+                tokens.push_back({ TokenType::Operator, std::string(1, currentChar) });
+                pos++;
                 continue;
             }
 
-            // Punctuation
-            if (currentChar == '(' || currentChar == ')') {
-                tokens.emplace_back(TokenType::Punctuation, std::string(1, currentChar), line, column);
-                currentPos++;
-                column++;
-                continue;
-            }
-
-            tokens.emplace_back(TokenType::Unknown, std::string(1, currentChar), line, column);
-            currentPos++;
-            column++;
+            tokens.push_back({ TokenType::Unknown, std::string(1, currentChar) });
+            pos++;
         }
 
-        tokens.emplace_back(TokenType::EndOfFile, "", line, column);
+        tokens.push_back({ TokenType::EndOfFile, "" });
         return tokens;
     }
 
-private:
-    std::string source;
-    size_t currentPos;
-    size_t line;
-    size_t column;
-
-    std::string readIdentifier() {
-        size_t start = currentPos;
-        while (currentPos < source.length() && (std::isalnum(source[currentPos]) || source[currentPos] == '_')) {
-            currentPos++;
-            column++;
-        }
-        return source.substr(start, currentPos - start);
-    }
-
-    std::string readLiteral() {
-        size_t start = currentPos;
-        while (currentPos < source.length() && std::isdigit(source[currentPos])) {
-            currentPos++;
-            column++;
-        }
-        return source.substr(start, currentPos - start);
-    }
-
-    std::string readMatrixLiteral() {
-        size_t start = currentPos;
-        int braceCount = 0;
-        while (currentPos < source.length()) {
-            if (source[currentPos] == '{') {
-                braceCount++;
-            } else if (source[currentPos] == '}') {
-                braceCount--;
-                if (braceCount == 0) {
-                    currentPos++; // Move past the closing brace
-                    column++;
-                    break; 
-                }
-            }
-            currentPos++;
-            column++;
-        }
-        return source.substr(start, currentPos - start);
-    }
-};
-
-// AST Classes
-
-/// Base class for all expression nodes
-class ExprAST {
-public:
-    virtual ~ExprAST() = default;
-};
-
-/// MatrixExprAST (class for matrix literals)
-class MatrixExprAST : public ExprAST {
-    std::vector<std::vector<double>> Mat;
-
-public:
-    MatrixExprAST(const std::vector<std::vector<double>>& Mat) : Mat(Mat) {}
-
-    const std::vector<std::vector<double>>& getMatrix() const { return Mat; }
-
-    static std::vector<std::vector<double>> parseMatrixLiteral(const std::string& literal) {
-        std::vector<std::vector<double>> matrix;
-        std::stringstream ss(literal.substr(1, literal.length() - 2)); // Remove outer braces
-        std::string row;
-        while (std::getline(ss, row, '}')) {
-            if (row.find('{') != std::string::npos) {
-                row = row.substr(row.find('{') + 1);
-                std::stringstream rowStream(row);
-                std::vector<double> values;
-                std::string value;
-                while (std::getline(rowStream, value, ',')) {
-                    values.push_back(std::stod(value));
-                }
-                matrix.push_back(values);
-            }
-        }
-        return matrix;
-    }
-};
-
-/// BinaryExprAST - (Expression class for a binary operator)
-class BinaryExprAST : public ExprAST {
-    char Op;
-    std::unique_ptr<ExprAST> LHS, RHS;
-
-public:
-    BinaryExprAST(char Op, std::unique_ptr<ExprAST> LHS, std::unique_ptr<ExprAST> RHS)
-        : Op(Op), LHS(std::move(LHS)), RHS(std::move(RHS)) {}
-
-    std::vector<std::vector<double>> evalMatrixMultiplication();
-};
-
-// Evaluation for Matrix Multiplication
-std::vector<std::vector<double>> BinaryExprAST::evalMatrixMultiplication() {
-    MatrixExprAST* lhsMatrix = dynamic_cast<MatrixExprAST*>(LHS.get());
-    MatrixExprAST* rhsMatrix = dynamic_cast<MatrixExprAST*>(RHS.get());
-
-    if (!lhsMatrix || !rhsMatrix) {
-        throw std::runtime_error("Matrix multiplication requires two matrices.");
-    }
-
-    const auto& mat1 = lhsMatrix->getMatrix();
-    const auto& mat2 = rhsMatrix->getMatrix();
-
-    if (mat1[0].size() != mat2.size()) {
-        throw std::runtime_error("Matrix dimensions are incompatible for multiplication.");
-    }
-
-    std::vector<std::vector<double>> result(mat1.size(), std::vector<double>(mat2[0].size(), 0));
-
-    for (size_t i = 0; i < mat1.size(); ++i) {
-        for (size_t j = 0; j < mat2[0].size(); ++j) {
-            for (size_t k = 0; k < mat2.size(); ++k) {
-                result[i][j] += mat1[i][k] * mat2[k][j];
-            }
-        }
-    }
-
-    return result;
-}
-
-// Parser for Matrix Multiplication
-class Parser {
-    std::vector<Token> tokens;
-    size_t currentTokenIdx;
-
-public:
-    Parser(const std::vector<Token>& tokens) : tokens(tokens), currentTokenIdx(0) {}
-
-    std::unique_ptr<ExprAST> parse() {
-        auto LHS = parsePrimary();
-        return parseBinaryOpRHS(std::move(LHS));
-    }
-
-private:
     Token getCurrentToken() {
-        return tokens[currentTokenIdx];
+        return tokens[currentPos];
     }
 
     void advanceToken() {
-        if (currentTokenIdx < tokens.size()) {
-            currentTokenIdx++;
+        if (currentPos < tokens.size()) {
+            currentPos++;
         }
     }
 
-    std::unique_ptr<ExprAST> parsePrimary() {
-        Token token = getCurrentToken();
+    int getPrecedence(const std::string& op) {
+        if (op == "+" || op == "-") return 1;
+        if (op == "*" || op == "/") return 2;
+        return 0;
+    }
 
-        if (token.type == TokenType::MatrixLiteral) {
-            advanceToken();
-            auto matrix = MatrixExprAST::parseMatrixLiteral(token.value);
-            return std::make_unique<MatrixExprAST>(matrix);
+    std::unique_ptr<ASTNode> parseExpression(int precedence = 0) {
+        auto LHS = parsePrimary();
+        return parseBinaryOpRHS(std::move(LHS), precedence);
+    }
+
+    std::unique_ptr<ASTNode> parsePrimary() {
+        Token token = getCurrentToken();
+        advanceToken();
+
+        if (token.type == TokenType::Identifier) {
+            return std::make_unique<IdentifierNode>(token.value);
+        }
+
+        if (token.type == TokenType::Literal) {
+            return std::make_unique<LiteralNode>(token.value);
         }
 
         return nullptr;
     }
 
-    std::unique_ptr<ExprAST> parseBinaryOpRHS(std::unique_ptr<ExprAST> LHS) {
+    std::unique_ptr<ASTNode> parseBinaryOpRHS(std::unique_ptr<ASTNode> LHS, int precedence) {
         while (true) {
             Token token = getCurrentToken();
-            if (token.type == TokenType::Operator && token.value == "*") {
+            int tokenPrecedence = getPrecedence(token.value);
+
+            if (token.type == TokenType::Operator && tokenPrecedence > precedence) {
                 advanceToken();
                 auto RHS = parsePrimary();
-                LHS = std::make_unique<BinaryExprAST>('*', std::move(LHS), std::move(RHS));
+                Token nextToken = getCurrentToken();
+                int nextPrecedence = getPrecedence(nextToken.value);
+
+                if (tokenPrecedence < nextPrecedence) {
+                    RHS = parseBinaryOpRHS(std::move(RHS), tokenPrecedence);
+                }
+
+                LHS = std::make_unique<BinaryOperationNode>(std::move(LHS), token.value, std::move(RHS));
             } else {
                 break;
             }
@@ -267,30 +194,17 @@ private:
     }
 };
 
-// Driver Code
 int main() {
-    std::string sourceCode = "{{1, 2}, {3, 4}} * {{5, 6}, {7, 8}}";
+    std::string input;
+    std::cout << "Enter an expression: ";
+    std::getline(std::cin, input);
 
-    // Lexing
-    Lexer lexer(sourceCode);
-    std::vector<Token> tokens = lexer.tokenize();
+    Parser parser;
+    auto ast = parser.parse(input);
 
-    // Parsing
-    Parser parser(tokens);
-    auto expr = parser.parse();
-
-    // Evaluation
-    if (auto* binaryExpr = dynamic_cast<BinaryExprAST*>(expr.get())) {
-        auto result = binaryExpr->evalMatrixMultiplication();
-        for (const auto& row : result) {
-            for (double val : row) {
-                std::cout << val << " ";
-            }
-            std::cout << "\n";
-        }
-    } else {
-        std::cerr << "Invalid expression!\n";
-    }
+    // Print the AST in a tree-like structure
+    std::cout << "Abstract Syntax Tree:" << std::endl;
+    ast->print();
 
     return 0;
 }
