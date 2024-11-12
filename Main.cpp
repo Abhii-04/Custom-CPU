@@ -5,16 +5,20 @@
 #include <memory>
 #include <stdexcept>
 #include <sstream>
-#include <iostream>
-#include <memory>
-#include <string>
-#include <vector>
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Module.h>
+#include <llvm/IR/Value.h>
+#include <llvm/Support/raw_ostream.h>
+
+
 
 // AST Classes
 class ASTNode {
 public:
     virtual ~ASTNode() = default;
-    virtual void print(int indent = 0) const = 0; // Virtual print method for derived classes
+    virtual void print(int indent = 0) const = 0;
+    virtual llvm::Value* codegen(llvm::LLVMContext &context, llvm::IRBuilder<> &builder) = 0;
 };
 
 // Binary operation node
@@ -27,6 +31,20 @@ public:
         std::cout << std::string(indent, ' ') << "BinaryOperation: " << op << std::endl;
         if (left) left->print(indent + 2);
         if (right) right->print(indent + 2);
+    }
+
+    llvm::Value* codegen(llvm::LLVMContext &context, llvm::IRBuilder<> &builder) override {
+        llvm::Value* L = left->codegen(context, builder);
+        llvm::Value* R = right->codegen(context, builder);
+        
+        if (!L || !R) return nullptr;
+
+        if (op == "+") return builder.CreateFAdd(L, R, "addtmp");
+        else if (op == "-") return builder.CreateFSub(L, R, "subtmp");
+        else if (op == "*") return builder.CreateFMul(L, R, "multmp");
+        else if (op == "/") return builder.CreateFDiv(L, R, "divtmp");
+        
+        return nullptr;
     }
 
 private:
@@ -44,6 +62,10 @@ public:
         std::cout << std::string(indent, ' ') << "Identifier: " << name << std::endl;
     }
 
+    llvm::Value* codegen(llvm::LLVMContext &context, llvm::IRBuilder<> &builder) override {
+        return nullptr; // Implement if you have variables
+    }
+
 private:
     std::string name;
 };
@@ -55,6 +77,10 @@ public:
 
     void print(int indent = 0) const override {
         std::cout << std::string(indent, ' ') << "Literal: " << value << std::endl;
+    }
+
+    llvm::Value* codegen(llvm::LLVMContext &context, llvm::IRBuilder<> &builder) override {
+        return llvm::ConstantFP::get(context, llvm::APFloat(std::stod(value)));
     }
 
 private:
@@ -208,5 +234,25 @@ int main() {
     std::cout << "Abstract Syntax Tree:" << std::endl;
     ast->print();
 
+    // Set up LLVM
+    llvm::LLVMContext context;
+    llvm::IRBuilder<> builder(context);
+    auto module = std::make_unique<llvm::Module>("calc_module", context);
+
+    // Create a main function to hold our generated code
+    llvm::FunctionType *funcType = llvm::FunctionType::get(builder.getDoubleTy(), false);
+    llvm::Function *mainFunction = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage, "main", module.get());
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(context, "entry", mainFunction);
+    builder.SetInsertPoint(entry);
+
+    // Generate LLVM IR from AST
+    llvm::Value *result = ast->codegen(context, builder);
+    builder.CreateRet(result);
+
+    // Print out the generated LLVM IR
+    module->print(llvm::errs(), nullptr);
+
     return 0;
 }
+
+
