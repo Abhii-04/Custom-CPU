@@ -54,6 +54,10 @@ public:
         llvm::Value* condVal = condition->codegen(context, builder);
         if (!condVal) return nullptr;
 
+        // Ensure the condition is a boolean (i1)
+        llvm::Value* zero = llvm::ConstantFP::get(context, llvm::APFloat(0.0));
+        condVal = builder.CreateFCmpONE(condVal, zero, "ifcond");
+
         llvm::Function* function = builder.GetInsertBlock()->getParent();
 
         // Create the basic blocks for "then", "else", and "merge"
@@ -81,9 +85,9 @@ public:
 
         // Create PHI node to merge results from "then" and "else" branches.
         llvm::PHINode* phi = builder.CreatePHI(llvm::Type::getDoubleTy(context), 2, "iftmp");
-        phi->addIncoming(thenVal, thenBlock);  // Add the "then" value
-        phi->addIncoming(elseVal, elseBlock);  // Add the "else" value
-
+        phi->addIncoming(thenVal, thenBlock);  // Ensure thenVal is a double
+        phi->addIncoming(elseVal, elseBlock);  // Ensure elseVal is a double
+        
         return phi;
     }
 
@@ -121,6 +125,16 @@ public:
         else if (op == "-") return builder.CreateFSub(L, R, "subtmp");
         else if (op == "*") return builder.CreateFMul(L, R, "multmp");
         else if (op == "/") return builder.CreateFDiv(L, R, "divtmp");
+        else if (op == ">") {
+            llvm::Value* cmpResult = builder.CreateFCmpOGT(L, R, "gttmp");
+            return builder.CreateUIToFP(cmpResult, builder.getDoubleTy(), "booltmp");
+        } else if (op == "<") {
+            llvm::Value* cmpResult = builder.CreateFCmpOLT(L, R, "lttmp");
+            return builder.CreateUIToFP(cmpResult, builder.getDoubleTy(), "booltmp");
+        } else if (op == "==") {
+            llvm::Value* cmpResult = builder.CreateFCmpOEQ(L, R, "eqtmp");
+            return builder.CreateUIToFP(cmpResult, builder.getDoubleTy(), "booltmp");
+        }
 
         return nullptr; // Invalid operator
     }
@@ -202,74 +216,86 @@ private:
 
     // Tokenizes the input string into individual tokens.
     std::vector<Token> tokenize(const std::string& input) {
-    std::vector<Token> tokens;
-    size_t pos = 0;
-    while (pos < input.length()) {
-        char currentChar = input[pos];
+        std::vector<Token> tokens;
+        size_t pos = 0;
+        while (pos < input.length()) {
+            char currentChar = input[pos];
 
-        if (std::isspace(currentChar)) { pos++; continue; }
+            if (std::isspace(currentChar)) { pos++; continue; }
 
-        if (std::isalpha(currentChar)) { 
-            std::string identifier;
-            while (pos < input.length() && (std::isalnum(input[pos]) || input[pos] == '_')) {
-                identifier += input[pos++];
+            if (std::isalpha(currentChar)) { 
+                std::string identifier;
+                while (pos < input.length() && (std::isalnum(input[pos]) || input[pos] == '_')) {
+                    identifier += input[pos++];
+                }
+                if (identifier == "if") {
+                    tokens.push_back({ TokenType::If, identifier });
+                } else if (identifier == "then") {
+                    tokens.push_back({ TokenType::Then, identifier });
+                } else if (identifier == "else") {
+                    tokens.push_back({ TokenType::Else, identifier });
+                } else {
+                    tokens.push_back({ TokenType::Identifier, identifier });
+                }
+                continue;
             }
-            if (identifier == "if") {
-                tokens.push_back({ TokenType::If, identifier });
-            } else if (identifier == "then") {
-                tokens.push_back({ TokenType::Then, identifier });
-            } else if (identifier == "else") {
-                tokens.push_back({ TokenType::Else, identifier });
-            } else {
-                tokens.push_back({ TokenType::Identifier, identifier });
-            }
-            std::cout << "Token: " << identifier << std::endl; // Debug print
-            continue;
-        }
 
-        if (std::isdigit(currentChar)) {
-            std::string literal;
-            while (pos < input.length() && std::isdigit(input[pos])) {
-                literal += input[pos++];
+            if (std::isdigit(currentChar)) {
+                std::string literal;
+                while (pos < input.length() && std::isdigit(input[pos])) {
+                    literal += input[pos++];
+                }
+                tokens.push_back({ TokenType::Literal, literal });
+                continue;
             }
-            tokens.push_back({ TokenType::Literal, literal });
-            continue;
-        }
 
-        if (currentChar == '+' || currentChar == '-' || currentChar == '*' || currentChar == '/') {
-            tokens.push_back({ TokenType::Operator, std::string(1, currentChar) });
+            if (currentChar == '+' || currentChar == '-' || currentChar == '*' || currentChar == '/' || currentChar == '>' || currentChar == '<') {
+                tokens.push_back({ TokenType::Operator, std::string(1, currentChar) });
+                pos++;
+                continue;
+            }
+
+            tokens.push_back({ TokenType::Unknown, std::string(1, currentChar) });
             pos++;
-            continue;
         }
 
-        tokens.push_back({ TokenType::Unknown, std::string(1, currentChar) });
-        pos++;
+        std::cout << tokens[currentPos].value << std::endl;
+        return tokens;
     }
-
-    tokens.push_back({ TokenType::EndOfFile, "" });
-    return tokens;
-}
 
     Token getCurrentToken() { return tokens[currentPos]; }
     void advanceToken() { if (currentPos < tokens.size()) currentPos++; }
 
     int getPrecedence(const std::string& op) {
-        if ( op == "-") return 1;
-        if (op == "+") return 2;
-        if (op == "*" ) return 3;
-        if (op == "/") return 4;
-        if (op == ">" || op == "<" || op == "==") return 5;
+        if (op == ">" || op == "<" || op == "==") return 1;
+        if ( op == "-") return 2;
+        if (op == "+") return 3;
+        if (op == "*" ) return 4;
+        if (op == "/") return 5;
         return 0;
     }
 
-        std::unique_ptr<ASTNode> parseExpression(int precedence = 0) {
-            if (getCurrentToken().type == TokenType::If) {
-                return parseIfElse(); 
-            }
-
-            auto LHS = parsePrimary();
-            return parseBinaryOpRHS(std::move(LHS), precedence);
+    std::unique_ptr<ASTNode> parseExpression(int precedence = 0) {
+        if (currentPos >= tokens.size()) {
+            std::cerr << "Reached end of tokens without finding expression" << std::endl;
+            return nullptr;
         }
+
+        // Check if the current token is 'if' for an if-else expression.
+        if (getCurrentToken().type == TokenType::If) {
+            return parseIfElse();
+        }
+
+        // Parse the left-hand side of the expression.
+        auto LHS = parsePrimary();
+        if (!LHS) {
+            std::cerr << "Error parsing primary expression." << std::endl;
+            return nullptr;
+        }
+
+        // Parse any binary operations on the right-hand side.
+        return parseBinaryOpRHS(std::move(LHS), precedence);
+    }
 
         std::unique_ptr<ASTNode> parsePrimary() {
             Token token = getCurrentToken();
@@ -284,50 +310,61 @@ private:
         std::unique_ptr<ASTNode> parseIfElse() {
             // Expect 'if' token
             if (getCurrentToken().type != TokenType::If) {
-                return nullptr; // Should not happen, just a safety check
+                std::cerr << "Error: Expected 'if' token, but got: " << getCurrentToken().value << std::endl;
+                return nullptr;
             }
             advanceToken();  // Move past 'if'
-
-            // Parse condition (everything before 'then')
+            
+            // Parse the condition (everything before 'then')
             auto condition = parseExpression();
             if (!condition) {
                 std::cerr << "Error: Missing condition in 'if' statement." << std::endl;
                 return nullptr;
             }
 
-            // Expect 'then' token
+            // Ensure token is 'then' after the condition
+            
             if (getCurrentToken().type != TokenType::Then) {
-                std::cerr << "Error: Missing 'then' in 'if' statement." << std::endl;
+                std::cerr << "Error: Expected 'then' token, but got: " << getCurrentToken().value << std::endl;
                 return nullptr;
             }
             advanceToken();  // Move past 'then'
 
-            // Parse the then branch
+            // Parse the 'then' branch (expression after 'then')
+            
             auto thenBranch = parseExpression();
             if (!thenBranch) {
                 std::cerr << "Error: Missing 'then' branch in 'if' statement." << std::endl;
                 return nullptr;
             }
 
-            // Expect 'else' token
+            // Ensure token is 'else' after the 'then' branch
             if (getCurrentToken().type != TokenType::Else) {
-                std::cerr << "Error: Missing 'else' in 'if' statement." << std::endl;
+                std::cerr << "Error: Expected 'else' token, but got: " << getCurrentToken().value << std::endl;
                 return nullptr;
             }
             advanceToken();  // Move past 'else'
 
-            // Parse the else branch
+            // Parse the 'else' branch (expression after 'else')
             auto elseBranch = parseExpression();
             if (!elseBranch) {
                 std::cerr << "Error: Missing 'else' branch in 'if' statement." << std::endl;
                 return nullptr;
             }
 
-            // Return the IfElseNode with the condition, then branch, and else branch
+            // Return the IfElseNode with the condition, thenBranch, and elseBranch
             return std::make_unique<IfElseNode>(std::move(condition), std::move(thenBranch), std::move(elseBranch));
         }
 
-        std::unique_ptr<ASTNode> parseBinaryOpRHS(std::unique_ptr<ASTNode> LHS, int precedence) {
+
+
+
+        std::unique_ptr<ASTNode> parseBinaryOpRHS(std::unique_ptr<ASTNode> LHS, int precedence, int depth = 0) {
+            if (depth > 100) { // Guard against infinite recursion
+                std::cerr << "Maximum recursion depth exceeded." << std::endl;
+                return nullptr;
+            }
+
             while (true) {
                 Token token = getCurrentToken();
                 int tokenPrecedence = getPrecedence(token.value);
@@ -335,11 +372,17 @@ private:
                 if (token.type == TokenType::Operator && tokenPrecedence > precedence) {
                     advanceToken();
                     auto RHS = parsePrimary();
+                    if (!RHS) {
+                        std::cerr << "Error parsing right-hand side of operation." << std::endl;
+                        return nullptr;
+                    }
+
                     Token nextToken = getCurrentToken();
                     int nextPrecedence = getPrecedence(nextToken.value);
+                    std::cout << "Next token: " << nextToken.value << std::endl;
 
                     if (tokenPrecedence < nextPrecedence) {
-                        RHS = parseBinaryOpRHS(std::move(RHS), tokenPrecedence);
+                        RHS = parseBinaryOpRHS(std::move(RHS), tokenPrecedence, depth + 1);
                     }
 
                     LHS = std::make_unique<BinaryOperationNode>(std::move(LHS), token.value, std::move(RHS));
@@ -347,6 +390,7 @@ private:
                     break;
                 }
             }
+
             return std::move(LHS);
         }
 };
@@ -388,8 +432,11 @@ int main() {
 
     // Prepare and run the generated function.
     std::string error;
-    llvm::ExecutionEngine *execEngine = llvm::EngineBuilder(std::move(module)).setErrorStr(&error).create();
-    
+    llvm::ExecutionEngine *execEngine = llvm::EngineBuilder(std::move(module))
+        .setErrorStr(&error)
+        .setEngineKind(llvm::EngineKind::JIT)
+        .create();
+
     if (!execEngine) {
         std::cerr << "Failed to create execution engine: " << error << std::endl;
         return 1;
@@ -398,11 +445,11 @@ int main() {
     // Run the compiled function and display the result.
     std::vector<llvm::GenericValue> args;
     llvm::GenericValue gv = execEngine->runFunction(calcFunction, args);
-    double resultValue = gv.DoubleVal;
+    double resultValue = gv.DoubleVal;  // Expecting a double return
     std::cout << "Result: " << resultValue << std::endl;
 
     delete execEngine;
     return 0;
 }
 
-// clang++ Main.cpp -o final_executable $(llvm-config --cxxflags --ldflags --system-libs --libs all)
+// clang++ testing.cpp -o final_executable $(llvm-config --cxxflags --ldflags --system-libs --libs all)
