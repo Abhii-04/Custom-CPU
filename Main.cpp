@@ -36,6 +36,35 @@ public:
     virtual llvm::Value* codegen(llvm::LLVMContext &context, llvm::IRBuilder<> &builder) = 0;
 };
 
+// Represents a vector literal in the AST (e.g., [1.0, 2.0, 3.0])
+class VectorNode : public ASTNode {
+public:
+    VectorNode(std::vector<std::string> values) : values(std::move(values)) {}
+
+    void print(int indent = 0) const override {
+        std::cout << std::string(indent, ' ') << "Vector: [";
+        for (size_t i = 0; i < values.size(); ++i) {
+            std::cout << values[i];
+            if (i != values.size() - 1) std::cout << ", ";
+        }
+        std::cout << "]" << std::endl;
+    }
+
+    llvm::Value* codegen(llvm::LLVMContext &context, llvm::IRBuilder<> &builder) override {
+        std::vector<llvm::Constant*> llvmValues;
+        for (const auto& value : values) {
+            llvmValues.push_back(llvm::ConstantFP::get(context, llvm::APFloat(std::stod(value))));
+        }
+        
+        // Create a vector of constants (float values).
+        llvm::ArrayRef<llvm::Constant*> arrayRef(llvmValues);
+        return llvm::ConstantVector::get(arrayRef);
+    }
+
+private:
+    std::vector<std::string> values;
+};
+
 
 class IfElseNode : public ASTNode {
 public:
@@ -53,10 +82,6 @@ public:
         // Generate the condition code
         llvm::Value* condVal = condition->codegen(context, builder);
         if (!condVal) return nullptr;
-
-        // Ensure the condition is a boolean (i1)
-        llvm::Value* zero = llvm::ConstantFP::get(context, llvm::APFloat(0.0));
-        condVal = builder.CreateFCmpONE(condVal, zero, "ifcond");
 
         llvm::Function* function = builder.GetInsertBlock()->getParent();
 
@@ -85,9 +110,9 @@ public:
 
         // Create PHI node to merge results from "then" and "else" branches.
         llvm::PHINode* phi = builder.CreatePHI(llvm::Type::getDoubleTy(context), 2, "iftmp");
-        phi->addIncoming(thenVal, thenBlock);  // Ensure thenVal is a double
-        phi->addIncoming(elseVal, elseBlock);  // Ensure elseVal is a double
-        
+        phi->addIncoming(thenVal, thenBlock);  // Add the "then" value
+        phi->addIncoming(elseVal, elseBlock);  // Add the "else" value
+
         return phi;
     }
 
@@ -97,44 +122,40 @@ private:
     std::unique_ptr<ASTNode> elseBranch; // Else branch AST
 };
 
-
-
 // Represents a binary operation (e.g., addition, subtraction) in the AST.
 class BinaryOperationNode : public ASTNode {
 public:
-    // Constructor taking left operand, operator, and right operand.
     BinaryOperationNode(std::unique_ptr<ASTNode> left, std::string op, std::unique_ptr<ASTNode> right)
         : left(std::move(left)), op(std::move(op)), right(std::move(right)) {}
 
-    // Prints the operator and recursively prints left and right operands.
     void print(int indent = 0) const override {
         std::cout << std::string(indent, ' ') << "BinaryOperation: " << op << std::endl;
         if (left) left->print(indent + 2);
         if (right) right->print(indent + 2);
     }
 
-    // Generates LLVM IR for the binary operation.
+
     llvm::Value* codegen(llvm::LLVMContext &context, llvm::IRBuilder<> &builder) override {
         llvm::Value* L = left->codegen(context, builder);  // Generate code for left operand
         llvm::Value* R = right->codegen(context, builder); // Generate code for right operand
         
         if (!L || !R) return nullptr; // Return null if any operand is invalid
 
-        // Perform the specific operation based on the operator type.
-        if (op == "+") return builder.CreateFAdd(L, R, "addtmp");
-        else if (op == "-") return builder.CreateFSub(L, R, "subtmp");
-        else if (op == "*") return builder.CreateFMul(L, R, "multmp");
-        else if (op == "/") return builder.CreateFDiv(L, R, "divtmp");
-        else if (op == ">") {
-            llvm::Value* cmpResult = builder.CreateFCmpOGT(L, R, "gttmp");
-            return builder.CreateUIToFP(cmpResult, builder.getDoubleTy(), "booltmp");
-        } else if (op == "<") {
-            llvm::Value* cmpResult = builder.CreateFCmpOLT(L, R, "lttmp");
-            return builder.CreateUIToFP(cmpResult, builder.getDoubleTy(), "booltmp");
-        } else if (op == "==") {
-            llvm::Value* cmpResult = builder.CreateFCmpOEQ(L, R, "eqtmp");
-            return builder.CreateUIToFP(cmpResult, builder.getDoubleTy(), "booltmp");
+        // Handle vector addition
+        if (op == "+") {
+            if (llvm::isa<llvm::ConstantVector>(L) && llvm::isa<llvm::ConstantVector>(R)) {
+                return createVectorAddition(L, R, builder, context);
+            }
+            return builder.CreateFAdd(L, R, "addtmp");
         }
+        else if (op == "-") return builder.CreateFSub(L, R, "subtmp");
+        else if (op == "*") {
+            if (llvm::isa<llvm::ConstantVector>(L) && llvm::isa<llvm::ConstantVector>(R)) {
+                return createVectorMultiplication(L, R, builder, context);
+            }
+            return builder.CreateFMul(L, R, "multmp");
+        }
+        else if (op == "/") return builder.CreateFDiv(L, R, "divtmp");
 
         return nullptr; // Invalid operator
     }
@@ -143,6 +164,86 @@ private:
     std::unique_ptr<ASTNode> left;  // Left operand
     std::string op;                 // Operator symbol
     std::unique_ptr<ASTNode> right; // Right operand
+
+    //multiplication
+    llvm::Value* createVectorMultiplication(llvm::Value* L, llvm::Value* R, llvm::IRBuilder<> &builder, llvm::LLVMContext &context) {
+        llvm::ConstantVector* leftVector = llvm::dyn_cast<llvm::ConstantVector>(L);
+        llvm::ConstantVector* rightVector = llvm::dyn_cast<llvm::ConstantVector>(R);
+        
+        if (!leftVector || !rightVector) return nullptr;
+
+        // Check that both vectors have the same size
+        if (leftVector->getNumOperands() != rightVector->getNumOperands()) return nullptr;
+
+        std::vector<llvm::Constant*> result;  // Change back to Constant*
+        for (size_t i = 0; i < leftVector->getNumOperands(); ++i) {
+            llvm::Value* leftElem = leftVector->getOperand(i);
+            llvm::Value* rightElem = rightVector->getOperand(i);
+
+            // Ensure both elements are constants and perform element-wise multiplication
+            if (llvm::isa<llvm::Constant>(leftElem) && llvm::isa<llvm::Constant>(rightElem)) {
+                llvm::Constant* leftConstant = llvm::cast<llvm::Constant>(leftElem);
+                llvm::Constant* rightConstant = llvm::cast<llvm::Constant>(rightElem);
+
+                // Perform constant multiplication
+                llvm::Constant* multipliedConstant = nullptr;
+
+                if (leftConstant->getType()->isFloatingPointTy()) {
+                    multipliedConstant = llvm::ConstantExpr::getMul(leftConstant, rightConstant);
+                } else if (leftConstant->getType()->isIntegerTy()) {
+                    multipliedConstant = llvm::ConstantExpr::getMul(leftConstant, rightConstant);
+                }
+
+                if (multipliedConstant) {
+                    result.push_back(multipliedConstant);
+                }
+            }
+        }
+
+        // Convert to ArrayRef and create ConstantVector
+        llvm::ArrayRef<llvm::Constant*> arrayRef(result);
+        return llvm::ConstantVector::get(arrayRef);
+    }
+
+
+    // Helper function for vector addition
+    llvm::Value* createVectorAddition(llvm::Value* L, llvm::Value* R, llvm::IRBuilder<> &builder, llvm::LLVMContext &context) {
+        llvm::ConstantVector* leftVector = llvm::dyn_cast<llvm::ConstantVector>(L);
+        llvm::ConstantVector* rightVector = llvm::dyn_cast<llvm::ConstantVector>(R);
+        
+        if (!leftVector || !rightVector) return nullptr;
+
+        // Check that both vectors have the same size
+        if (leftVector->getNumOperands() != rightVector->getNumOperands()) return nullptr;
+
+        std::vector<llvm::Constant*> result;  // Use llvm::Constant* instead of llvm::Value*
+        for (size_t i = 0; i < leftVector->getNumOperands(); ++i) {
+            llvm::Value* leftElem = leftVector->getOperand(i);
+            llvm::Value* rightElem = rightVector->getOperand(i);
+
+            // Ensure both elements are constants and perform element-wise addition
+            if (llvm::isa<llvm::Constant>(leftElem) && llvm::isa<llvm::Constant>(rightElem)) {
+                llvm::Constant* leftConstant = llvm::cast<llvm::Constant>(leftElem);
+                llvm::Constant* rightConstant = llvm::cast<llvm::Constant>(rightElem);
+
+                // Perform constant addition
+                llvm::Constant* addedConstant = nullptr;
+
+                if (leftConstant->getType()->isIntegerTy()) {
+                    addedConstant = llvm::ConstantExpr::getAdd(leftConstant, rightConstant); // Integer addition
+                } else if (leftConstant->getType()->isFloatTy() || leftConstant->getType()->isDoubleTy()) {
+                    addedConstant = llvm::ConstantExpr::getAdd(leftConstant, rightConstant); // Floating-point addition
+                }
+
+                if (addedConstant) {
+                    result.push_back(addedConstant);
+                }
+            }
+        }
+
+        return llvm::ConstantVector::get(result);  // Now result is a vector of llvm::Constant*
+    }
+
 };
 
 // Represents an identifier (e.g., variable name) in the AST.
@@ -154,9 +255,8 @@ public:
         std::cout << std::string(indent, ' ') << "Identifier: " << name << std::endl;
     }
 
-    // Placeholder code generation (returns null as we're not handling variables).
     llvm::Value* codegen(llvm::LLVMContext &context, llvm::IRBuilder<> &builder) override {
-        return nullptr;
+        return nullptr; // Placeholder, we're not handling variables here.
     }
 
 private:
@@ -172,7 +272,6 @@ public:
         std::cout << std::string(indent, ' ') << "Literal: " << value << std::endl;
     }
 
-    // Generates LLVM IR for a floating-point literal.
     llvm::Value* codegen(llvm::LLVMContext &context, llvm::IRBuilder<> &builder) override {
         return llvm::ConstantFP::get(context, llvm::APFloat(std::stod(value)));
     }
@@ -186,7 +285,6 @@ class Parser {
 public:
     Parser() : currentPos(0) {}
 
-    // Parses an expression string into an AST.
     std::unique_ptr<ASTNode> parse(const std::string& input) {
         tokens = tokenize(input);
         currentPos = 0;
@@ -194,7 +292,6 @@ public:
     }
 
 private:
-    // Token types for parsing
     enum class TokenType {
         Identifier,
         Literal,
@@ -202,6 +299,8 @@ private:
         If,
         Then,
         Else,
+        LeftBracket,
+        RightBracket,
         Unknown,
         EndOfFile
     };
@@ -214,189 +313,236 @@ private:
     std::vector<Token> tokens;
     size_t currentPos;
 
-    // Tokenizes the input string into individual tokens.
+   int getPrecedence(const std::string& op) {
+        if ( op == "-") return 1;
+        if (op == "+") return 2;
+        if (op == "*" ) return 3;
+        if (op == "/") return 4;
+        if (op == ">" || op == "<" || op == "==") return 5;
+        return 0;}
+
     std::vector<Token> tokenize(const std::string& input) {
         std::vector<Token> tokens;
         size_t pos = 0;
+        bool insideVector = false; // Flag to track if we're inside a vector
+
         while (pos < input.length()) {
             char currentChar = input[pos];
 
-            if (std::isspace(currentChar)) { pos++; continue; }
-
-            if (std::isalpha(currentChar)) { 
-                std::string identifier;
-                while (pos < input.length() && (std::isalnum(input[pos]) || input[pos] == '_')) {
-                    identifier += input[pos++];
-                }
-                if (identifier == "if") {
-                    tokens.push_back({ TokenType::If, identifier });
-                } else if (identifier == "then") {
-                    tokens.push_back({ TokenType::Then, identifier });
-                } else if (identifier == "else") {
-                    tokens.push_back({ TokenType::Else, identifier });
-                } else {
-                    tokens.push_back({ TokenType::Identifier, identifier });
-                }
-                continue;
+            if (std::isspace(currentChar)) { 
+                pos++; 
+                continue; 
             }
 
-            if (std::isdigit(currentChar)) {
-                std::string literal;
+            if (std::isalpha(currentChar)) {
+                 std::string identifier;
+            while (pos < input.length() && (std::isalnum(input[pos]) || input[pos] == '_')) {
+                identifier += input[pos++];
+            }
+            if (identifier == "if") {
+                tokens.push_back({ TokenType::If, identifier });
+            } else if (identifier == "then") {
+                tokens.push_back({ TokenType::Then, identifier });
+            } else if (identifier == "else") {
+                tokens.push_back({ TokenType::Else, identifier });
+            } else {
+                tokens.push_back({ TokenType::Identifier, identifier });
+            }
+            std::cout << "Token: " << identifier << std::endl; // Debug print
+            continue;
+            }
+            else if (std::isdigit(currentChar)) {
+                std::string number;
                 while (pos < input.length() && std::isdigit(input[pos])) {
-                    literal += input[pos++];
+                    number += input[pos++];
                 }
-                tokens.push_back({ TokenType::Literal, literal });
-                continue;
+                tokens.push_back({TokenType::Literal, number});
             }
-
-            if (currentChar == '+' || currentChar == '-' || currentChar == '*' || currentChar == '/' || currentChar == '>' || currentChar == '<') {
-                tokens.push_back({ TokenType::Operator, std::string(1, currentChar) });
+            else if (currentChar == '+') {
+                tokens.push_back({TokenType::Operator, "+"});
                 pos++;
-                continue;
             }
-
-            tokens.push_back({ TokenType::Unknown, std::string(1, currentChar) });
-            pos++;
+            else if (currentChar == '-') {
+                tokens.push_back({TokenType::Operator, "-"});
+                pos++;
+            }
+            else if (currentChar == '*') {
+                tokens.push_back({TokenType::Operator, "*"});
+                pos++;
+            }
+            else if (currentChar == '/') {
+                tokens.push_back({TokenType::Operator, "/"});
+                pos++;
+            }
+            else if (currentChar == '[') {
+                if (insideVector) {
+                    throw std::runtime_error("Unexpected '[' inside a vector");
+                }
+                tokens.push_back({TokenType::LeftBracket, "["});
+                insideVector = true; // We're now inside a vector
+                pos++;
+            }
+            else if (currentChar == ']') {
+                if (!insideVector) {
+                    throw std::runtime_error("Unexpected ']' outside of a vector");
+                }
+                tokens.push_back({TokenType::RightBracket, "]"});
+                insideVector = false; // We're leaving the vector
+                pos++;
+            }
+            else if (currentChar == ',') {  // Handling comma inside vector
+                if (!insideVector) {
+                    throw std::runtime_error("Unexpected ',' outside of a vector");
+                }
+                tokens.push_back({TokenType::Operator, ","});
+                pos++;
+            }
+            else {
+                tokens.push_back({TokenType::Unknown, std::string(1, currentChar)});
+                pos++;
+            }
         }
 
-        std::cout << tokens[currentPos].value << std::endl;
+        if (insideVector) {
+            throw std::runtime_error("tokeniser:   closing bracket ']' after vector");
+        }
+
+        tokens.push_back({TokenType::EndOfFile, ""});
         return tokens;
     }
 
     Token getCurrentToken() { return tokens[currentPos]; }
     void advanceToken() { if (currentPos < tokens.size()) currentPos++; }
 
-    int getPrecedence(const std::string& op) {
-        if (op == ">" || op == "<" || op == "==") return 1;
-        if ( op == "-") return 2;
-        if (op == "+") return 3;
-        if (op == "*" ) return 4;
-        if (op == "/") return 5;
-        return 0;
-    }
-
-    std::unique_ptr<ASTNode> parseExpression(int precedence = 0) {
-        if (currentPos >= tokens.size()) {
-            std::cerr << "Reached end of tokens without finding expression" << std::endl;
-            return nullptr;
-        }
-
-        // Check if the current token is 'if' for an if-else expression.
+    std::unique_ptr<ASTNode> parseExpression() {
         if (getCurrentToken().type == TokenType::If) {
-            return parseIfElse();
+            return parseIfElse(); 
         }
 
-        // Parse the left-hand side of the expression.
-        auto LHS = parsePrimary();
-        if (!LHS) {
-            std::cerr << "Error parsing primary expression." << std::endl;
-            return nullptr;
+        // Start with parsing the left side of the expression
+        std::unique_ptr<ASTNode> left = parsePrimaryExpression();
+
+        // Continue parsing binary operations
+        while (currentPos < tokens.size() && 
+            tokens[currentPos].type == TokenType::Operator) {
+            std::cout<<tokens[currentPos].value<<std::endl;
+            std::string op = tokens[currentPos].value;
+            
+            // Check if the operator is one of the supported operations
+            if (op == "+" || op == "-" || op == "*" || op == "/") {
+                currentPos++;  // Consume the operator
+                
+                // Parse the right side of the operation
+                std::unique_ptr<ASTNode> right = parsePrimaryExpression();
+                
+                // Create a new binary operation node, which becomes the new left
+                left = std::make_unique<BinaryOperationNode>(
+                    std::move(left), 
+                    op, 
+                    std::move(right)
+                );
+            } else {
+                // If it's not a recognized operator, break the loop
+                break;
+            }
         }
 
-        // Parse any binary operations on the right-hand side.
-        return parseBinaryOpRHS(std::move(LHS), precedence);
+        return left;
     }
 
-        std::unique_ptr<ASTNode> parsePrimary() {
-            Token token = getCurrentToken();
-            advanceToken();
+    std::unique_ptr<ASTNode> parsePrimaryExpression() {
+    if (tokens[currentPos].type == TokenType::Literal) {
+        std::string value = tokens[currentPos].value;
+        currentPos++;
+        return std::make_unique<LiteralNode>(value);
+    }
 
-            if (token.type == TokenType::Identifier) return std::make_unique<IdentifierNode>(token.value);
-            if (token.type == TokenType::Literal) return std::make_unique<LiteralNode>(token.value);
+    if (tokens[currentPos].type == TokenType::LeftBracket) {
+        currentPos++;  // Consume '['
+        std::vector<std::string> values;
 
-            return nullptr;
+        // Parse the vector elements, allowing commas between values
+        while (tokens[currentPos].type == TokenType::Literal || tokens[currentPos].type == TokenType::Operator) {
+            if (tokens[currentPos].type == TokenType::Literal) {
+                values.push_back(tokens[currentPos].value);
+                currentPos++;  // Consume the literal value
+            }
+
+            // Handle the case where there is a comma after a value
+            if (tokens[currentPos].type == TokenType::Operator && tokens[currentPos].value == ",") {
+                currentPos++;  // Consume the comma
+            }
+            // Ensure that we don't encounter an unexpected token
+            else if (tokens[currentPos].type != TokenType::RightBracket) {
+                throw std::runtime_error("Unexpected token inside vector");
+            }
         }
 
-        std::unique_ptr<ASTNode> parseIfElse() {
-            // Expect 'if' token
-            if (getCurrentToken().type != TokenType::If) {
-                std::cerr << "Error: Expected 'if' token, but got: " << getCurrentToken().value << std::endl;
-                return nullptr;
-            }
-            advanceToken();  // Move past 'if'
-            
-            // Parse the condition (everything before 'then')
-            auto condition = parseExpression();
-            if (!condition) {
-                std::cerr << "Error: Missing condition in 'if' statement." << std::endl;
-                return nullptr;
-            }
-
-            // Ensure token is 'then' after the condition
-            
-            if (getCurrentToken().type != TokenType::Then) {
-                std::cerr << "Error: Expected 'then' token, but got: " << getCurrentToken().value << std::endl;
-                return nullptr;
-            }
-            advanceToken();  // Move past 'then'
-
-            // Parse the 'then' branch (expression after 'then')
-            
-            auto thenBranch = parseExpression();
-            if (!thenBranch) {
-                std::cerr << "Error: Missing 'then' branch in 'if' statement." << std::endl;
-                return nullptr;
-            }
-
-            // Ensure token is 'else' after the 'then' branch
-            if (getCurrentToken().type != TokenType::Else) {
-                std::cerr << "Error: Expected 'else' token, but got: " << getCurrentToken().value << std::endl;
-                return nullptr;
-            }
-            advanceToken();  // Move past 'else'
-
-            // Parse the 'else' branch (expression after 'else')
-            auto elseBranch = parseExpression();
-            if (!elseBranch) {
-                std::cerr << "Error: Missing 'else' branch in 'if' statement." << std::endl;
-                return nullptr;
-            }
-
-            // Return the IfElseNode with the condition, thenBranch, and elseBranch
-            return std::make_unique<IfElseNode>(std::move(condition), std::move(thenBranch), std::move(elseBranch));
+        // If the next token is not a closing bracket, throw an error
+        if (tokens[currentPos].type != TokenType::RightBracket) {
+            throw std::runtime_error("Expected closing bracket ']' after vector");
         }
 
+        currentPos++;  // Consume ']'
 
+        return std::make_unique<VectorNode>(values);
+    }
 
+    throw std::runtime_error("Unexpected token in primary expression");
+}
 
-        std::unique_ptr<ASTNode> parseBinaryOpRHS(std::unique_ptr<ASTNode> LHS, int precedence, int depth = 0) {
-            if (depth > 100) { // Guard against infinite recursion
-                std::cerr << "Maximum recursion depth exceeded." << std::endl;
-                return nullptr;
-            }
-
-            while (true) {
-                Token token = getCurrentToken();
-                int tokenPrecedence = getPrecedence(token.value);
-
-                if (token.type == TokenType::Operator && tokenPrecedence > precedence) {
-                    advanceToken();
-                    auto RHS = parsePrimary();
-                    if (!RHS) {
-                        std::cerr << "Error parsing right-hand side of operation." << std::endl;
-                        return nullptr;
-                    }
-
-                    Token nextToken = getCurrentToken();
-                    int nextPrecedence = getPrecedence(nextToken.value);
-                    std::cout << "Next token: " << nextToken.value << std::endl;
-
-                    if (tokenPrecedence < nextPrecedence) {
-                        RHS = parseBinaryOpRHS(std::move(RHS), tokenPrecedence, depth + 1);
-                    }
-
-                    LHS = std::make_unique<BinaryOperationNode>(std::move(LHS), token.value, std::move(RHS));
-                } else {
-                    break;
+    std::unique_ptr<ASTNode> parseIfElse() {
+                // Expect 'if' token
+                if (getCurrentToken().type != TokenType::If) {
+                    return nullptr; // Should not happen, just a safety check
                 }
+                advanceToken();  // Move past 'if'
+
+                // Parse condition (everything before 'then')
+                auto condition = parseExpression();
+                if (!condition) {
+                    std::cerr << "Error: Missing condition in 'if' statement." << std::endl;
+                    return nullptr;
+                }
+
+                // Expect 'then' token
+                if (getCurrentToken().type != TokenType::Then) {
+                    std::cerr << "Error: Missing 'then' in 'if' statement." << std::endl;
+                    return nullptr;
+                }
+                advanceToken();  // Move past 'then'
+
+                // Parse the then branch
+                auto thenBranch = parseExpression();
+                if (!thenBranch) {
+                    std::cerr << "Error: Missing 'then' branch in 'if' statement." << std::endl;
+                    return nullptr;
+                }
+
+                // Expect 'else' token
+                if (getCurrentToken().type != TokenType::Else) {
+                    std::cerr << "Error: Missing 'else' in 'if' statement." << std::endl;
+                    return nullptr;
+                }
+                advanceToken();  // Move past 'else'
+
+                // Parse the else branch
+                auto elseBranch = parseExpression();
+                if (!elseBranch) {
+                    std::cerr << "Error: Missing 'else' branch in 'if' statement." << std::endl;
+                    return nullptr;
+                }
+
+                // Return the IfElseNode with the condition, then branch, and else branch
+                return std::make_unique<IfElseNode>(std::move(condition), std::move(thenBranch), std::move(elseBranch));
             }
 
-            return std::move(LHS);
-        }
+    
+
 };
 
+// Main function to test the AST creation and execution
 int main() {
-
     // Initialize LLVM components for native code execution.
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
@@ -410,6 +556,7 @@ int main() {
     std::cout << "Enter an expression to evaluate (e.g., 1+2-4*4): ";
     std::getline(std::cin, expression);
 
+    // Assuming Parser class exists and parses the expression into an AST
     Parser parser;
     auto astRoot = parser.parse(expression);
     if (!astRoot) {
@@ -432,24 +579,24 @@ int main() {
 
     // Prepare and run the generated function.
     std::string error;
-    llvm::ExecutionEngine *execEngine = llvm::EngineBuilder(std::move(module))
-        .setErrorStr(&error)
-        .setEngineKind(llvm::EngineKind::JIT)
-        .create();
-
+    llvm::ExecutionEngine *execEngine = llvm::EngineBuilder(std::move(module)).setErrorStr(&error).create();
+    
     if (!execEngine) {
         std::cerr << "Failed to create execution engine: " << error << std::endl;
         return 1;
     }
 
     // Run the compiled function and display the result.
-    std::vector<llvm::GenericValue> args;
-    llvm::GenericValue gv = execEngine->runFunction(calcFunction, args);
-    double resultValue = gv.DoubleVal;  // Expecting a double return
-    std::cout << "Result: " << resultValue << std::endl;
+    // std::vector<llvm::GenericValue> args;
+    // llvm::GenericValue gv = execEngine->runFunction(calcFunction, args);
+    // double resultValue = gv.DoubleVal;
+    // std::cout << "Result: " << resultValue << std::endl;
 
     delete execEngine;
     return 0;
 }
 
-// clang++ testing.cpp -o final_executable $(llvm-config --cxxflags --ldflags --system-libs --libs all)
+
+
+// clang++ Main.cpp -o final_executable $(llvm-config --cxxflags --ldflags --system-libs --libs all)
+// clang++ Main.cpp -o final_executable $(llvm-config --cxxflags --ldflags --system-libs --libs all) -fexceptions
