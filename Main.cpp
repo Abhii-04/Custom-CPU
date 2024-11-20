@@ -79,42 +79,46 @@ public:
     }
 
     llvm::Value* codegen(llvm::LLVMContext &context, llvm::IRBuilder<> &builder) override {
-        // Generate the condition code
-        llvm::Value* condVal = condition->codegen(context, builder);
-        if (!condVal) return nullptr;
+    // Generate the condition code
+    llvm::Value* condVal = condition->codegen(context, builder);
+    if (!condVal) return nullptr;
 
-        llvm::Function* function = builder.GetInsertBlock()->getParent();
+    // Convert condition to a boolean (zero vs. non-zero comparison)
+    condVal = builder.CreateFCmpUNE(condVal, llvm::ConstantFP::get(context, llvm::APFloat(0.0)), "isNonZero");
 
-        // Create the basic blocks for "then", "else", and "merge"
-        llvm::BasicBlock* thenBlock = llvm::BasicBlock::Create(context, "then", function);
-        llvm::BasicBlock* elseBlock = llvm::BasicBlock::Create(context, "else", function);
-        llvm::BasicBlock* mergeBlock = llvm::BasicBlock::Create(context, "ifcont", function);
+    llvm::Function* function = builder.GetInsertBlock()->getParent();
 
-        // Create the conditional branch based on the condition
-        builder.CreateCondBr(condVal, thenBlock, elseBlock);
+    // Create the basic blocks for "then", "else", and "merge"
+    llvm::BasicBlock* thenBlock = llvm::BasicBlock::Create(context, "then", function);
+    llvm::BasicBlock* elseBlock = llvm::BasicBlock::Create(context, "else", function);
+    llvm::BasicBlock* mergeBlock = llvm::BasicBlock::Create(context, "ifcont", function);
 
-        // Generate code for the "then" branch.
-        builder.SetInsertPoint(thenBlock);
-        llvm::Value* thenVal = thenBranch->codegen(context, builder);
-        if (!thenVal) return nullptr;
-        builder.CreateBr(mergeBlock);  // Jump to merge block after "then" branch.
+    // Create the conditional branch based on the condition
+    builder.CreateCondBr(condVal, thenBlock, elseBlock);
 
-        // Generate code for the "else" branch.
-        builder.SetInsertPoint(elseBlock);
-        llvm::Value* elseVal = elseBranch->codegen(context, builder);
-        if (!elseVal) return nullptr;
-        builder.CreateBr(mergeBlock);  // Jump to merge block after "else" branch.
+    // Generate code for the "then" branch.
+    builder.SetInsertPoint(thenBlock);
+    llvm::Value* thenVal = thenBranch->codegen(context, builder);
+    if (!thenVal) return nullptr;
+    builder.CreateBr(mergeBlock);  // Jump to merge block after "then" branch.
 
-        // Now, create the merge block.
-        builder.SetInsertPoint(mergeBlock);
+    // Generate code for the "else" branch.
+    builder.SetInsertPoint(elseBlock);
+    llvm::Value* elseVal = elseBranch->codegen(context, builder);
+    if (!elseVal) return nullptr;
+    builder.CreateBr(mergeBlock);  // Jump to merge block after "else" branch.
 
-        // Create PHI node to merge results from "then" and "else" branches.
-        llvm::PHINode* phi = builder.CreatePHI(llvm::Type::getDoubleTy(context), 2, "iftmp");
-        phi->addIncoming(thenVal, thenBlock);  // Add the "then" value
-        phi->addIncoming(elseVal, elseBlock);  // Add the "else" value
+    // Now, create the merge block.
+    builder.SetInsertPoint(mergeBlock);
 
-        return phi;
-    }
+    // Create PHI node to merge results from "then" and "else" branches.
+    llvm::PHINode* phi = builder.CreatePHI(llvm::Type::getDoubleTy(context), 2, "iftmp");
+    phi->addIncoming(thenVal, thenBlock);  // Add the "then" value
+    phi->addIncoming(elseVal, elseBlock);  // Add the "else" value
+
+    return phi;
+}
+
 
 private:
     std::unique_ptr<ASTNode> condition;  // Condition for the if-else
@@ -213,6 +217,8 @@ private:
         
         if (!leftVector || !rightVector) return nullptr;
 
+        
+
         // Check that both vectors have the same size
         if (leftVector->getNumOperands() != rightVector->getNumOperands()) return nullptr;
 
@@ -246,23 +252,57 @@ private:
 
 };
 
+
+std::map<std::string, llvm::Value*> symbolTable;
 // Represents an identifier (e.g., variable name) in the AST.
 class IdentifierNode : public ASTNode {
 public:
     IdentifierNode(std::string name) : name(std::move(name)) {}
+
+    const std::string& getName() const { return name; }  // Method to get the name
 
     void print(int indent = 0) const override {
         std::cout << std::string(indent, ' ') << "Identifier: " << name << std::endl;
     }
 
     llvm::Value* codegen(llvm::LLVMContext &context, llvm::IRBuilder<> &builder) override {
-        return nullptr; // Placeholder, we're not handling variables here.
+        if (symbolTable.find(name) == symbolTable.end()) {
+            std::cerr << "Undefined variable: " << name << std::endl;
+            return nullptr;
+        }
+        return symbolTable[name];  // Retrieve the variable's value from the symbol table
     }
 
 private:
-    std::string name;
+    std::string name;  // The variable name
 };
 
+
+
+// Represents an assignment in the AST (e.g., `x = 10`).
+class AssignmentNode : public ASTNode {
+public:
+    AssignmentNode(std::string variable, std::unique_ptr<ASTNode> valueNode)
+        : variable(std::move(variable)), valueNode(std::move(valueNode)) {}
+
+    void print(int indent = 0) const override {
+        std::cout << std::string(indent, ' ') << "Assignment: " << variable << " =" << std::endl;
+        if (valueNode) valueNode->print(indent + 2);
+    }
+
+    llvm::Value* codegen(llvm::LLVMContext &context, llvm::IRBuilder<> &builder) override {
+        llvm::Value* value = valueNode->codegen(context, builder);
+        if (!value) return nullptr;
+
+        // Store the value in the symbol table
+        symbolTable[variable] = value;
+        return value; // Return the assigned value
+    }
+
+private:
+    std::string variable;                    // Variable name
+    std::unique_ptr<ASTNode> valueNode;      // Value expression
+};
 // Represents a numeric literal (constant value) in the AST.
 class LiteralNode : public ASTNode {
 public:
@@ -279,6 +319,7 @@ public:
 private:
     std::string value;
 };
+
 
 // Parser class to convert a string expression into an AST.
 class Parser {
@@ -297,7 +338,9 @@ private:
         Literal,
         Operator,
         If,
+        Assignment,
         Then,
+        Semicolon,
         Else,
         LeftBracket,
         RightBracket,
@@ -314,15 +357,16 @@ private:
     size_t currentPos;
 
    int getPrecedence(const std::string& op) {
-        if ( op == "-") return 1;
-        if (op == "+") return 2;
-        if (op == "*" ) return 3;
-        if (op == "/") return 4;
-        if (op == ">" || op == "<" || op == "==") return 5;
+        if ( op == "=") return 1;
+        if (op == ">" || op == "<" || op == "==") return 2;
+        if ( op == "-") return 3;
+        if (op == "+") return 4;
+        if (op == "*" ) return 5;
+        if (op == "/") return 6;
         return 0;}
 
     std::vector<Token> tokenize(const std::string& input) {
-        std::vector<Token> tokens;
+            std::vector<Token> tokens;
         size_t pos = 0;
         bool insideVector = false; // Flag to track if we're inside a vector
 
@@ -335,45 +379,54 @@ private:
             }
 
             if (std::isalpha(currentChar)) {
-                 std::string identifier;
-            while (pos < input.length() && (std::isalnum(input[pos]) || input[pos] == '_')) {
-                identifier += input[pos++];
-            }
-            if (identifier == "if") {
-                tokens.push_back({ TokenType::If, identifier });
-            } else if (identifier == "then") {
-                tokens.push_back({ TokenType::Then, identifier });
-            } else if (identifier == "else") {
-                tokens.push_back({ TokenType::Else, identifier });
-            } else {
-                tokens.push_back({ TokenType::Identifier, identifier });
-            }
-            std::cout << "Token: " << identifier << std::endl; // Debug print
-            continue;
-            }
+                std::string identifier;
+                while (pos < input.length() && (std::isalnum(input[pos]) || input[pos] == '_')) {
+                    identifier += input[pos++];
+                }
+                if (identifier == "if") {
+                    tokens.push_back({ TokenType::If, identifier });
+                } else if (identifier == "then") {
+                    tokens.push_back({ TokenType::Then, identifier });
+                } else if (identifier == "else") {
+                    tokens.push_back({ TokenType::Else, identifier });
+                } else {
+                    tokens.push_back({ TokenType::Identifier, identifier });
+                }
+                std::cout << "Token: " << identifier << std::endl; // Debug print
+                continue;
+            } 
             else if (std::isdigit(currentChar)) {
                 std::string number;
                 while (pos < input.length() && std::isdigit(input[pos])) {
                     number += input[pos++];
                 }
                 tokens.push_back({TokenType::Literal, number});
-            }
+                continue;
+            } 
             else if (currentChar == '+') {
                 tokens.push_back({TokenType::Operator, "+"});
                 pos++;
-            }
+            } 
             else if (currentChar == '-') {
                 tokens.push_back({TokenType::Operator, "-"});
                 pos++;
-            }
+            } 
             else if (currentChar == '*') {
                 tokens.push_back({TokenType::Operator, "*"});
                 pos++;
-            }
+            } 
             else if (currentChar == '/') {
                 tokens.push_back({TokenType::Operator, "/"});
                 pos++;
-            }
+            } 
+            else if (currentChar == '=') {
+                tokens.push_back({TokenType::Assignment, "="});
+                pos++;
+            } 
+            else if (currentChar == ';') {
+                tokens.push_back({TokenType::Semicolon, ";"});
+                pos++;
+            } 
             else if (currentChar == '[') {
                 if (insideVector) {
                     throw std::runtime_error("Unexpected '[' inside a vector");
@@ -381,7 +434,7 @@ private:
                 tokens.push_back({TokenType::LeftBracket, "["});
                 insideVector = true; // We're now inside a vector
                 pos++;
-            }
+            } 
             else if (currentChar == ']') {
                 if (!insideVector) {
                     throw std::runtime_error("Unexpected ']' outside of a vector");
@@ -389,14 +442,14 @@ private:
                 tokens.push_back({TokenType::RightBracket, "]"});
                 insideVector = false; // We're leaving the vector
                 pos++;
-            }
+            } 
             else if (currentChar == ',') {  // Handling comma inside vector
                 if (!insideVector) {
                     throw std::runtime_error("Unexpected ',' outside of a vector");
                 }
                 tokens.push_back({TokenType::Operator, ","});
                 pos++;
-            }
+            } 
             else {
                 tokens.push_back({TokenType::Unknown, std::string(1, currentChar)});
                 pos++;
@@ -415,46 +468,71 @@ private:
     void advanceToken() { if (currentPos < tokens.size()) currentPos++; }
 
     std::unique_ptr<ASTNode> parseExpression() {
-        if (getCurrentToken().type == TokenType::If) {
-            return parseIfElse(); 
-        }
-
-        // Start with parsing the left side of the expression
-        std::unique_ptr<ASTNode> left = parsePrimaryExpression();
-
-        // Continue parsing binary operations
-        while (currentPos < tokens.size() && 
-            tokens[currentPos].type == TokenType::Operator) {
-            std::cout<<tokens[currentPos].value<<std::endl;
-            std::string op = tokens[currentPos].value;
-            
-            // Check if the operator is one of the supported operations
-            if (op == "+" || op == "-" || op == "*" || op == "/") {
-                currentPos++;  // Consume the operator
-                
-                // Parse the right side of the operation
-                std::unique_ptr<ASTNode> right = parsePrimaryExpression();
-                
-                // Create a new binary operation node, which becomes the new left
-                left = std::make_unique<BinaryOperationNode>(
-                    std::move(left), 
-                    op, 
-                    std::move(right)
-                );
-            } else {
-                // If it's not a recognized operator, break the loop
-                break;
-            }
-        }
-
-        return left;
+    if (getCurrentToken().type == TokenType::If) {
+        return parseIfElse(); 
     }
 
-    std::unique_ptr<ASTNode> parsePrimaryExpression() {
+    // Start with parsing the left side of the expression
+    std::unique_ptr<ASTNode> left = parsePrimaryExpression();
+
+    // Continue parsing binary operations or assignment
+    while (currentPos < tokens.size()) {
+        std::string op = tokens[currentPos].value;
+        
+        // Handle assignment first, since it's a higher precedence operation
+        if (op == "=") {
+            currentPos++;  // Consume the '=' token
+            
+            // Parse the right-hand side of the assignment
+            std::unique_ptr<ASTNode> right = parsePrimaryExpression();
+            
+            // Create an assignment operation node
+            if (auto* identifierNode = dynamic_cast<IdentifierNode*>(left.get())) {
+                std::string variableName = static_cast<IdentifierNode*>(left.get())->getName();
+
+                // Now create the AssignmentNode using the variable name and the right side value
+                left = std::make_unique<AssignmentNode>(
+                    variableName,  // The variable name (from the left side)
+                    std::move(right) // The right side (value to assign)
+                );
+            } else {
+                throw std::runtime_error("Left side of assignment must be a variable.");
+            }
+        } 
+        // Handle binary operators (+, -, *, /)
+        else if (op == "+" || op == "-" || op == "*" || op == "/") {
+            currentPos++;  // Consume the operator
+            
+            // Parse the right side of the operation
+            std::unique_ptr<ASTNode> right = parsePrimaryExpression();
+            
+            // Create a new binary operation node, which becomes the new left
+            left = std::make_unique<BinaryOperationNode>(
+                std::move(left), 
+                op, 
+                std::move(right)
+            );
+        } 
+        else {
+            // If it's not an assignment or binary operator, break the loop
+            break;
+        }
+    }
+
+    return left;
+}
+std::unique_ptr<ASTNode> parsePrimaryExpression() {
     if (tokens[currentPos].type == TokenType::Literal) {
         std::string value = tokens[currentPos].value;
         currentPos++;
         return std::make_unique<LiteralNode>(value);
+    }
+
+    // Add support for identifiers (e.g., variable names)
+    if (tokens[currentPos].type == TokenType::Identifier) {
+        std::string identifier = tokens[currentPos].value;
+        currentPos++;
+        return std::make_unique<IdentifierNode>(identifier); // IdentifierNode will represent variable names
     }
 
     if (tokens[currentPos].type == TokenType::LeftBracket) {
@@ -541,6 +619,33 @@ private:
 
 };
 
+void printResult(llvm::GenericValue gv, llvm::Type *returnType) {
+    // std::cout << "Result: "<<returnType<<std::endl;
+    if (returnType->isDoubleTy()) {
+        // If the return type is a scalar double
+        double resultValue = gv.DoubleVal;
+        std::cout << "Result (double): " << resultValue << std::endl;
+    } else if (returnType->isVectorTy()) {
+        // If the return type is a vector
+        llvm::VectorType *vectorType = llvm::cast<llvm::VectorType>(returnType);
+        llvm::ElementCount elementCount = vectorType->getElementCount();
+        unsigned numElements = elementCount.getKnownMinValue();
+
+        std::cout << "Result (vector): [";
+        for (unsigned i = 0; i < numElements; ++i) {
+            double elementValue = gv.AggregateVal[i].DoubleVal;
+            std::cout << elementValue;
+            if (i < numElements - 1) {
+                std::cout << ", ";
+            }
+        }
+        std::cout << "]" << std::endl;
+
+    } else {
+        std::cerr << "Unsupported return type!" << std::endl;
+    }
+}
+
 // Main function to test the AST creation and execution
 int main() {
     // Initialize LLVM components for native code execution.
@@ -586,11 +691,13 @@ int main() {
         return 1;
     }
 
+        std::vector<llvm::GenericValue> args;
+    llvm::GenericValue gv = execEngine->runFunction(calcFunction, args);
+
     // Run the compiled function and display the result.
-    // std::vector<llvm::GenericValue> args;
-    // llvm::GenericValue gv = execEngine->runFunction(calcFunction, args);
-    // double resultValue = gv.DoubleVal;
-    // std::cout << "Result: " << resultValue << std::endl;
+    llvm::Type *returnType = calcFunction->getReturnType();
+
+    printResult(gv, returnType);
 
     delete execEngine;
     return 0;
